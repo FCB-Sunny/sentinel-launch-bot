@@ -13,3 +13,4 @@ guard_state.json
 guard_state.json.tmp
 target.local.env
 .gitcache/
+target.local.sha

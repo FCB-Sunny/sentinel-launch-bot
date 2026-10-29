@@ -10,7 +10,9 @@
 #   bot.sh log                           follow the log (Ctrl-C leaves the log; the bot keeps running)
 #   bot.sh guard                         one GitHub guard check now, every repo and branch, with the held files
 #   bot.sh accept                        after reviewing a HOLD: accept exactly the held file versions (the bot goes on)
-#   bot.sh target [NAME REPO_URL | reset]  show / change the model to submit (then: setup, check, start)
+#   bot.sh target [NAME PATH|REPO_URL | reset]  show / change the model to submit: a zip or folder already on this
+#                                        machine, or a repo to clone (then: setup, check, start)
+#   bot.sh update                        update the bot itself from the public repo (no git or sign-in needed)
 #   bot.sh stop                          stop the bot
 #   bot.sh reboot-on | reboot-off        also start the bot again after a VPS reboot (crontab @reboot)
 # Settings: target.env (which model), bot.env (optional, never committed: NOTIFY_DISCORD_WEBHOOK=..., GITHUB_TOKEN=...).
@@ -19,7 +21,9 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ENV=${SENTINEL_ENV:-$HOME/sentinel_env}
 PIDF=$HERE/bot.pid; CONF=$HERE/bot.conf; LOGF=$HERE/bot.log; OUT=$HERE/bot.out
 set -a; . "$HERE/target.env"; [ -f "$HERE/target.local.env" ] && . "$HERE/target.local.env"; [ -f "$HERE/bot.env" ] && . "$HERE/bot.env"
-TARGET_SHA=$(awk '{print $1; exit}' "$TARGET_DIR/$TARGET_SHA_FILE" 2>/dev/null || true); set +a
+case "$TARGET_ZIP" in /*) ZIPF=$TARGET_ZIP ;; *) ZIPF=$TARGET_DIR/$TARGET_ZIP ;; esac
+case "$TARGET_SHA_FILE" in /*) SHAF=$TARGET_SHA_FILE ;; *) SHAF=$TARGET_DIR/$TARGET_SHA_FILE ;; esac
+TARGET_SHA=$(awk '{print $1; exit}' "$SHAF" 2>/dev/null || true); set +a
 
 running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
 need_env() { [ -x "$ENV/bin/python" ] || { echo "no Python env at $ENV: run 'bash bot.sh setup' first"; exit 1; }; }
@@ -121,8 +125,9 @@ PY
 
   target)
     if [ -z "${2:-}" ]; then
-      echo "target: $TARGET_NAME | repo $TARGET_REPO | folder $TARGET_DIR | zip sha256 ${TARGET_SHA:0:8}${TARGET_SHA:+...}"
+      echo "target: $TARGET_NAME | zip $ZIPF | sha256 ${TARGET_SHA:0:8}${TARGET_SHA:+...}${TARGET_REPO:+ | repo $TARGET_REPO}"
       [ -f "$HERE/target.local.env" ] && echo "(set by you in target.local.env; 'bash bot.sh target reset' goes back to the default)"
+      [ -f "$ZIPF" ] || echo "WARNING: the zip is not on this machine yet"
       exit 0
     fi
     if running; then echo "stop the bot first: bash bot.sh stop"; exit 1; fi
@@ -130,13 +135,44 @@ PY
       echo "this hotkey already committed a model (bot_state.json): one submission per hotkey, ever."
       echo "A new candidate needs a NEW hotkey (and UID); start the bot with that hotkey after changing the target."
     fi
-    if [ "$2" = "reset" ]; then rm -f "$HERE/target.local.env"; echo "target back to the default in target.env"; exit 0; fi
-    N=$2; R=${3:?usage: bash bot.sh target NAME REPO_URL   (the repo must hold Submission/submission.zip and Submission/sha256.txt)}
-    D=$HOME/$(basename "$R" .git)
-    printf 'TARGET_NAME=%s\nTARGET_REPO=%s\nTARGET_DIR=%s\nTARGET_ZIP=Submission/submission.zip\nTARGET_SHA_FILE=Submission/sha256.txt\n' "$N" "$R" "$D" > "$HERE/target.local.env"
-    echo "target set to $N ($R -> $D)."
-    echo "Next: bash bot.sh setup   (clones it and runs the official check; must end with READY)"
+    if [ "$2" = "reset" ]; then rm -f "$HERE/target.local.env" "$HERE/target.local.sha"; echo "target back to the default in target.env"; exit 0; fi
+    N=$2; R=${3:?usage: bash bot.sh target NAME /path/to/submission.zip   (or a folder holding it, or a repo URL)}
+    case "$R" in
+      http*://*|git@*)                             # a repo to clone (needs read access to it on this machine)
+        D=$HOME/$(basename "$R" .git)
+        printf 'TARGET_NAME=%s\nTARGET_REPO=%s\nTARGET_DIR=%s\nTARGET_ZIP=Submission/submission.zip\nTARGET_SHA_FILE=Submission/sha256.txt\n' "$N" "$R" "$D" > "$HERE/target.local.env"
+        echo "target set to $N ($R -> $D)." ;;
+      *)                                           # a zip, or a folder holding it, already on this machine
+        P=$(cd "$(dirname "$R")" 2>/dev/null && pwd)/$(basename "$R")
+        if [ -d "$P" ]; then
+          for z in "$P/Submission/submission.zip" "$P/submission.zip" "$P"/*.zip; do [ -f "$z" ] && { Z=$z; break; }; done
+        else Z=$P; fi
+        [ -n "${Z:-}" ] && [ -f "$Z" ] || { echo "no zip found at $R"; exit 1; }
+        got=$(sha256sum "$Z" | awk '{print $1}')
+        SF=""
+        for f in "$(dirname "$Z")/sha256.txt" "$(dirname "$Z")/$(basename "$Z").sha256"; do [ -f "$f" ] && { SF=$f; break; }; done
+        if [ -n "$SF" ]; then
+          want=$(awk '{print $1; exit}' "$SF")
+          [ "$got" = "$want" ] || { echo "the zip's sha256 $got does not match $SF ($want): wrong or damaged copy"; exit 1; }
+          echo "zip sha256 matches $SF (${got:0:8}...)"
+        else
+          echo "no sha256 file next to the zip. Its sha256 is:"; echo "  $got"
+          read -r -p "Is this the model you mean (compare with the sha you were given)? Type yes: " ok
+          [ "$ok" = "yes" ] || { echo "nothing changed"; exit 1; }
+          SF=$HERE/target.local.sha; echo "$got  $(basename "$Z")" > "$SF"
+        fi
+        printf 'TARGET_NAME=%s\nTARGET_REPO=\nTARGET_DIR=%s\nTARGET_ZIP=%s\nTARGET_SHA_FILE=%s\n' "$N" "$(dirname "$Z")" "$Z" "$SF" > "$HERE/target.local.env"
+        echo "target set to $N: $Z" ;;
+    esac
+    echo "Next: bash bot.sh setup   (official check of the zip, cloning first for a repo target; must end with READY)"
     echo "then: bash bot.sh check <WALLET> <HOTKEY>   and   bash bot.sh start <WALLET> <HOTKEY>" ;;
+
+  update)
+    if running; then echo "note: the running bot keeps its old code until you restart it (stop, then start)"; fi
+    TMP=$(mktemp -d) && curl -fsSL https://github.com/FCB-Sunny/sentinel-launch-bot/archive/refs/heads/main.tar.gz | tar xz -C "$TMP" \
+      || { echo "download failed"; rm -rf "$TMP"; exit 1; }
+    cp -r "$TMP"/sentinel-launch-bot-main/. "$HERE"/ && rm -rf "$TMP"
+    echo "bot updated from the public repo (your bot.env, accepted.json, guard state and target choice are kept)" ;;
 
   stop)
     if running; then

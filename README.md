@@ -31,6 +31,7 @@ bash bot.sh log         # follow the log live (Ctrl-C leaves the log; the bot ke
 bash bot.sh guard       # a GitHub check right now: every repo and branch, with the held files if any
 bash bot.sh stop        # stop the bot
 bash bot.sh reboot-on   # optional: start it again by itself after a VPS reboot
+bash bot.sh update      # get the latest bot (no git sign-in needed); then stop + start
 ```
 
 `setup` clones the target repo (`FCB-Sunny/sentinel-v10g`) to `~/sentinel-v10g`, the Swarm code at `3dcf8d6` to
@@ -79,20 +80,33 @@ decides on the last known state and logs a warning.
 
 ## Changing the candidate
 
-The candidate's repo must hold `Submission/submission.zip` and `Submission/sha256.txt` (the layout of
-`FCB-Sunny/sentinel-v10g`). Before the bot has submitted:
+Before the bot has submitted, point it at a zip that is already on the VPS (copied with `scp`, uploaded, or a folder
+you pulled yourself), so no GitHub sign-in is needed:
 
 ```bash
 bash bot.sh stop
-bash bot.sh target v10x https://github.com/FCB-Sunny/sentinel-v10x.git   # name + repo; saved in target.local.env
-bash bot.sh setup                                                        # clones it, official check: READY
-bash bot.sh check <WALLET> <HOTKEY>                                      # rehearsal
+bash bot.sh target v10x ~/models/v10x/submission.zip    # or a folder holding Submission/submission.zip
+bash bot.sh setup                                       # official check of the zip: READY
+bash bot.sh check <WALLET> <HOTKEY>                     # rehearsal
 bash bot.sh start <WALLET> <HOTKEY>
 ```
 
-`bash bot.sh target` shows the current candidate, and `bash bot.sh target reset` goes back to the default in
-`target.env`. **One submission per hotkey, ever:** after the bot has submitted, a new candidate needs a new hotkey
-(and UID).
+If a `sha256.txt` sits next to the zip, the zip must match it (a wrong or damaged copy is refused). Otherwise
+`target` shows the zip's sha256 and asks you to confirm it against the sha you were given. A repo URL also works
+(`bash bot.sh target v10x https://github.com/...`) where the VPS can read that repo. `bash bot.sh target` shows the
+current candidate; `bash bot.sh target reset` goes back to the default in `target.env`. Your choice lives in
+`target.local.env`, which updates never overwrite.
+
+**One submission per hotkey, ever:** after the bot has submitted, a new candidate needs a new hotkey (and UID).
+
+## Updating the bot
+
+```bash
+bash bot.sh update      # downloads the latest bot from this public repo; no git or sign-in needed
+bash bot.sh stop && bash bot.sh start <WALLET> <HOTKEY>   # the running bot uses the new code after a restart
+```
+
+`update` keeps `bot.env`, `accepted.json`, the guard state and your target choice.
 
 ## Alerts on your phone (optional)
 

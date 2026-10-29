@@ -19,6 +19,7 @@ import guard as G
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG, STATE = os.path.join(HERE, "bot.log"), os.path.join(HERE, "bot_state.json")
+STATUS = os.path.join(HERE, "bot_status.json")
 ENV = os.environ.get("SENTINEL_ENV", os.path.expanduser("~/sentinel_env"))
 CODE = os.environ.get("SENTINEL_CODE", os.path.expanduser("~/swarm_sentinel"))
 NAME = os.environ.get("TARGET_NAME", "?")
@@ -69,6 +70,21 @@ def load_state():
 
 def save_state(s):
     json.dump(s, open(STATE, "w"), indent=1)
+
+
+def write_status(phase, mode, live, last, verdict, guard, state):
+    """bot_status.json for `bot.sh live`: what the bot is doing right now (rewritten every loop, ~5 s)."""
+    refs = []
+    for (key, ref), r in guard.results.items():
+        tag = r.get("version") or (r.get("sha") or "")[:7]
+        refs.append(f"{key} {ref}: {r.get('status')} {tag}" + (f" ({len(r['holds'])} held files)" if r.get("holds") else ""))
+    s = dict(time=time.time(), phase=phase, mode=mode, target=f"{NAME} {SHA[:8]}", live=live,
+             backend_t=last["backend"], guard_t=last["guard"], activity_t=last["activity"], verdict=verdict,
+             refs=refs, gh_calls=guard.gh.calls, submitted=state.get("submitted"), committed=state.get("committed"),
+             attempts=state.get("attempts"))
+    tmp = STATUS + ".tmp"
+    json.dump(s, open(tmp, "w"), indent=1)
+    os.replace(tmp, STATUS)
 
 
 def live_now():
@@ -196,6 +212,7 @@ def main():
             log(e, notify=not first or "HOLD" in e)
         last["guard"] = time.time()
 
+    write_status("starting: first GitHub guard check", mode, None, last, verdict, guard, state)
     run_guard(first=True)
     log(f"guard verdict: {verdict.upper()}", notify=verdict == "hold")
     alerted = False
@@ -229,8 +246,10 @@ def main():
                     last["hold_note"] = now
             else:
                 log(f"SENTINEL IS LIVE - guard OK - submitting {NAME}", notify=True)
+                write_status("live: SUBMITTING", mode, live, last, verdict, guard, state)
                 if submit(args, state):
                     log(f"DONE: {NAME} submitted", notify=True)
+                    write_status("DONE: submitted", mode, live, last, verdict, guard, state)
                     return
                 time.sleep(30)
                 continue
@@ -246,6 +265,10 @@ def main():
             log(f"heartbeat: Sentinel {'live' if live else 'not live yet' if live is False else 'unknown (backend unreachable)'}"
                 f"; guard {verdict.upper()}; GitHub calls so far {guard.gh.calls}")
             last["beat"] = now
+        phase = ("live: HOLD (not submitting)" if live and verdict == "hold" and not args.allow_code_change
+                 else "live" if live else "watching (Sentinel not live yet)" if live is False
+                 else "watching (backend unreachable)")
+        write_status(phase, mode, live, last, verdict, guard, state)
         time.sleep(5)
 
 

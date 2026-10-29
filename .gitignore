@@ -7,3 +7,5 @@ bot.env
 accepted.json
 verify.log
 __pycache__/
+bot_status.json
+bot_status.json.tmp

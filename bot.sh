@@ -6,6 +6,7 @@
 #   bot.sh start  WALLET HOTKEY          run the bot in the background, LIVE: it submits the target ONCE when Sentinel
 #                                        opens, unless the GitHub guard holds; restarts itself after a crash
 #   bot.sh status                        running? guard verdict, submit state, last log lines
+#   bot.sh live                          real-time screen, refreshed every 2 s (Ctrl-C leaves it; the bot keeps running)
 #   bot.sh log                           follow the log (Ctrl-C leaves the log; the bot keeps running)
 #   bot.sh guard                         one GitHub guard check now, every repo and branch, with the held files
 #   bot.sh accept                        after reviewing a HOLD: accept exactly the held file versions (the bot goes on)
@@ -71,6 +72,40 @@ case "${1:-}" in
     grep -E "guard verdict|guard: HOLD|heartbeat" "$LOGF" 2>/dev/null | tail -n 2
     [ -f "$OUT" ] && tail -n 2 "$OUT"
     echo "--- last log lines"; tail -n 8 "$LOGF" 2>/dev/null ;;
+
+  live)
+    trap 'echo; echo "left the live view; the bot keeps running"; exit 0' INT
+    while true; do
+      screen=$(
+        echo "=== Sentinel launch bot - live view ($(date '+%Y-%m-%d %H:%M:%S %Z'))"
+        if running; then echo "bot process: RUNNING (pid $(cat "$PIDF"))"; else echo "bot process: NOT RUNNING"; fi
+        python3 - "$HERE/bot_status.json" <<'PY'
+import json, sys, time
+try:
+    s = json.load(open(sys.argv[1]))
+except Exception:
+    print("no status yet (the bot writes it every ~5 s once started)"); sys.exit()
+now = time.time()
+ago = lambda t: f"{int(now - t)} s ago" if t else "not yet"
+print(f"status updated {ago(s['time'])}   (older than ~30 s = the bot is busy or stopped)")
+print(f"PHASE:  {s['phase']}")
+print(f"mode {s['mode']} | target {s['target']}")
+live = {True: "LIVE", False: "not live yet", None: "unknown (unreachable)"}[s["live"]]
+print(f"official backend   Sentinel {live:<22} checked {ago(s['backend_t'])}  (every 15 s)")
+print(f"GitHub guard       verdict {s['verdict'].upper():<23} checked {ago(s['guard_t'])}  (every 60 s; GitHub calls {s['gh_calls']})")
+for r in s["refs"]:
+    print(f"    {r}")
+print(f"GitHub activity    checked {ago(s['activity_t'])}  (every 10 min)")
+print(f"submit             submitted {s['submitted']} | committed {s['committed']} | attempts {s['attempts']}")
+PY
+        echo "--- last log lines"
+        tail -n 12 "$LOGF" 2>/dev/null | cut -c1-200
+        echo "(refreshes every 2 s; Ctrl-C leaves this view - the bot keeps running)"
+      )
+      clear 2>/dev/null || printf '\033[2J\033[H'
+      echo "$screen"
+      sleep 2
+    done ;;
 
   log)
     tail -n 40 -f "$LOGF" ;;

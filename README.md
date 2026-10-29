@@ -25,6 +25,7 @@ bash bot.sh start  <WALLET> <HOTKEY>       # the bot runs in the background, LIV
 Any time:
 
 ```bash
+bash bot.sh live        # REAL-TIME screen, refreshed every 2 s (Ctrl-C leaves it; the bot keeps running)
 bash bot.sh status      # running? guard verdict, submitted?, last log lines
 bash bot.sh log         # follow the log live (Ctrl-C leaves the log; the bot keeps running)
 bash bot.sh guard       # a GitHub check right now: every repo and branch, with the held files if any

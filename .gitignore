@@ -1,0 +1,9 @@
+bot.log
+bot_state.json
+bot.out
+bot.pid
+bot.conf
+bot.env
+accepted.json
+verify.log
+__pycache__/

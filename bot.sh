@@ -10,6 +10,7 @@
 #   bot.sh log                           follow the log (Ctrl-C leaves the log; the bot keeps running)
 #   bot.sh guard                         one GitHub guard check now, every repo and branch, with the held files
 #   bot.sh accept                        after reviewing a HOLD: accept exactly the held file versions (the bot goes on)
+#   bot.sh target [NAME REPO_URL | reset]  show / change the model to submit (then: setup, check, start)
 #   bot.sh stop                          stop the bot
 #   bot.sh reboot-on | reboot-off        also start the bot again after a VPS reboot (crontab @reboot)
 # Settings: target.env (which model), bot.env (optional, never committed: NOTIFY_DISCORD_WEBHOOK=..., GITHUB_TOKEN=...).
@@ -17,7 +18,7 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ENV=${SENTINEL_ENV:-$HOME/sentinel_env}
 PIDF=$HERE/bot.pid; CONF=$HERE/bot.conf; LOGF=$HERE/bot.log; OUT=$HERE/bot.out
-set -a; . "$HERE/target.env"; [ -f "$HERE/bot.env" ] && . "$HERE/bot.env"
+set -a; . "$HERE/target.env"; [ -f "$HERE/target.local.env" ] && . "$HERE/target.local.env"; [ -f "$HERE/bot.env" ] && . "$HERE/bot.env"
 TARGET_SHA=$(awk '{print $1; exit}' "$TARGET_DIR/$TARGET_SHA_FILE" 2>/dev/null || true); set +a
 
 running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
@@ -117,6 +118,25 @@ PY
     echo "This accepts exactly the file versions held right now as reviewed. Only do this after reading them."
     read -r -p "Type ACCEPT to continue: " a; [ "$a" = "ACCEPT" ] || { echo "nothing accepted"; exit 1; }
     (cd "$HERE" && PY guard.py accept) ;;
+
+  target)
+    if [ -z "${2:-}" ]; then
+      echo "target: $TARGET_NAME | repo $TARGET_REPO | folder $TARGET_DIR | zip sha256 ${TARGET_SHA:0:8}${TARGET_SHA:+...}"
+      [ -f "$HERE/target.local.env" ] && echo "(set by you in target.local.env; 'bash bot.sh target reset' goes back to the default)"
+      exit 0
+    fi
+    if running; then echo "stop the bot first: bash bot.sh stop"; exit 1; fi
+    if [ -f "$HERE/bot_state.json" ] && grep -q '"committed": true' "$HERE/bot_state.json"; then
+      echo "this hotkey already committed a model (bot_state.json): one submission per hotkey, ever."
+      echo "A new candidate needs a NEW hotkey (and UID); start the bot with that hotkey after changing the target."
+    fi
+    if [ "$2" = "reset" ]; then rm -f "$HERE/target.local.env"; echo "target back to the default in target.env"; exit 0; fi
+    N=$2; R=${3:?usage: bash bot.sh target NAME REPO_URL   (the repo must hold Submission/submission.zip and Submission/sha256.txt)}
+    D=$HOME/$(basename "$R" .git)
+    printf 'TARGET_NAME=%s\nTARGET_REPO=%s\nTARGET_DIR=%s\nTARGET_ZIP=Submission/submission.zip\nTARGET_SHA_FILE=Submission/sha256.txt\n' "$N" "$R" "$D" > "$HERE/target.local.env"
+    echo "target set to $N ($R -> $D)."
+    echo "Next: bash bot.sh setup   (clones it and runs the official check; must end with READY)"
+    echo "then: bash bot.sh check <WALLET> <HOTKEY>   and   bash bot.sh start <WALLET> <HOTKEY>" ;;
 
   stop)
     if running; then

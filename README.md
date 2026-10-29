@@ -71,8 +71,28 @@ Every GitHub change the bot sees is sorted into one of these:
    them holds again. The running bot picks it up within a minute and submits if Sentinel is open.
 4. If it is not harmless, leave the bot on hold (or `bash bot.sh stop`). The model needs re-testing on the new code.
 
-If GitHub cannot be read at launch, the bot decides on its last good check and logs a warning. Unchanged branches are
-checked with ETags, which do not count against GitHub's rate limit, so no token is needed.
+The guard reads branch heads, tags and file lists with `git` (`git ls-remote` and a shallow, blob-free fetch into
+`.gitcache/`), which is outside GitHub's REST rate limit, so it keeps working without a token. Only the activity alerts
+use the REST API (60 requests an hour without a token; a `GITHUB_TOKEN` in `bot.env` lifts that to 5,000). The last
+known state is kept in `guard_state.json`, so a restart is never blind. If GitHub cannot be read at launch, the bot
+decides on the last known state and logs a warning.
+
+## Changing the candidate
+
+The candidate's repo must hold `Submission/submission.zip` and `Submission/sha256.txt` (the layout of
+`FCB-Sunny/sentinel-v10g`). Before the bot has submitted:
+
+```bash
+bash bot.sh stop
+bash bot.sh target v10x https://github.com/FCB-Sunny/sentinel-v10x.git   # name + repo; saved in target.local.env
+bash bot.sh setup                                                        # clones it, official check: READY
+bash bot.sh check <WALLET> <HOTKEY>                                      # rehearsal
+bash bot.sh start <WALLET> <HOTKEY>
+```
+
+`bash bot.sh target` shows the current candidate, and `bash bot.sh target reset` goes back to the default in
+`target.env`. **One submission per hotkey, ever:** after the bot has submitted, a new candidate needs a new hotkey
+(and UID).
 
 ## Alerts on your phone (optional)
 

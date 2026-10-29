@@ -7,16 +7,18 @@ on their main and Sentinel branches, plus PyPI's engine, and sorts every change 
               emission share), or files you accepted with `bot.sh accept`;
   hold      - anything else in a result-relevant file: the bot must NOT submit until you review it;
   absent    - the ref does not carry Sentinel (main before the merge); gone - the branch was deleted.
-Docs, tests, CI and lock files never count. Unchanged refs are checked with ETags (a 304 costs no GitHub rate limit), so
-it can poll every minute without a token.
+Docs, tests, CI and lock files never count. Branch heads and tags are read with `git ls-remote` (git's own protocol, outside
+the REST API's 60-an-hour limit without a token); the REST API is used only when a branch moves (its file list) and for
+the activity alerts. The last known state is kept in guard_state.json, so a restart is never blind.
 usage: guard.py report            one check now, printed
        guard.py accept            accept the files currently held (after you reviewed them)
        guard.py build-baseline    (maintainer) rebuild guard_baseline.json.gz from the tested commits"""
-import difflib, gzip, json, os, re, sys, time, urllib.error, urllib.request
+import difflib, gzip, json, os, re, subprocess, sys, time, urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BASELINE = os.path.join(HERE, "guard_baseline.json.gz")
 ACCEPTED = os.path.join(HERE, "accepted.json")
+STATE = os.path.join(HERE, "guard_state.json")
 TESTED_ENGINE = (2, 0, 0, 5)
 TESTED_DRONE_GYM = "2.0.0.3"
 DOCS = (r"^docs/", r"^\.github/", r"\.md$", r"(^|/)tests?/", r"^LICENSE", r"\.gitignore$", r"^\.pre-commit")
@@ -65,7 +67,7 @@ class GitHub:
             req.add_header("If-None-Match", self.etag[url])
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                self.calls += 1
+                self.calls += "api.github.com" in url   # only the REST API has the 60-an-hour limit without a token
                 data = r.read().decode()
                 body = json.loads(data) if "api.github.com" in url else data
                 if r.headers.get("ETag"):
@@ -78,6 +80,47 @@ class GitHub:
 
     def raw(self, repo, sha, path):
         return self.get(f"https://raw.githubusercontent.com/{repo}/{sha}/{path}", conditional=False)[0]
+
+    def ls_remote(self, repo):
+        """{ref name: sha} from `git ls-remote`: git's own protocol, outside the REST API's rate limit. Peeled tags
+        ('refs/tags/X^{}') name the commit an annotated tag points at."""
+        r = subprocess.run(["git", "ls-remote", f"https://github.com/{repo}.git"], capture_output=True, text=True,
+                           timeout=30, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        if r.returncode != 0:
+            raise RuntimeError(f"git ls-remote failed: {(r.stderr or r.stdout).strip()[:100]}")
+        out = {}
+        for line in r.stdout.splitlines():
+            sha, _, name = line.partition("\t")
+            out[name.strip()] = sha.strip()
+        return out
+
+    def tree(self, repo, sha):
+        """A commit's file list [{path, sha, type}], read with git (a shallow, blob-free fetch into a small local cache,
+        outside the REST rate limit); the REST API only when git fails."""
+        cache = os.path.join(HERE, ".gitcache", repo.replace("/", "__") + ".git")
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+        try:
+            if not os.path.isdir(cache):
+                os.makedirs(os.path.dirname(cache), exist_ok=True)
+                subprocess.run(["git", "init", "-q", "--bare", cache], check=True, capture_output=True, timeout=30)
+            r = subprocess.run(["git", "-C", cache, "fetch", "-q", "--depth", "1", "--filter=blob:none",
+                                f"https://github.com/{repo}.git", sha], capture_output=True, text=True, timeout=300, env=env)
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr.strip()[:100])
+            r = subprocess.run(["git", "-C", cache, "ls-tree", "-r", "--full-tree", sha], capture_output=True, text=True,
+                               timeout=60, check=True)
+            out = []
+            for line in r.stdout.splitlines():
+                meta, _, path = line.partition("\t")
+                parts = meta.split()
+                if len(parts) == 3:
+                    out.append(dict(path=path, sha=parts[2], type=parts[1]))
+            return out
+        except Exception:
+            t = self.get(f"repos/{repo}/git/trees/{sha}?recursive=1", conditional=False)[0]
+            if t.get("truncated"):
+                raise RuntimeError("tree truncated")
+            return t["tree"]
 
 
 def changed_lines(a, b):
@@ -99,7 +142,25 @@ class Guard:
         self.log, self.gh = log, GitHub()
         self.base = json.load(gzip.open(BASELINE, "rt"))
         self.results, self.extra, self.last_ok = {}, {}, 0.0
-        self.accepted_mtime = None
+        self.accepted_mtime, self.worlds_cache = None, {}
+        if os.path.exists(STATE):                      # the last known state survives a restart
+            try:
+                s = json.load(open(STATE))
+                self.results = {(k, r): v for k, r, v in s["results"]}
+                self.last_ok = float(s.get("last_ok", 0.0))
+                self.accepted_mtime = s.get("accepted_mtime")
+            except Exception:
+                self.results = {}
+
+    def save(self):
+        tmp = STATE + ".tmp"
+        json.dump(dict(results=[[k, r, v] for (k, r), v in self.results.items()], last_ok=self.last_ok,
+                       accepted_mtime=self.accepted_mtime), open(tmp, "w"))
+        os.replace(tmp, STATE)
+
+    def unknown(self):
+        """Refs never read yet (no state from an earlier run either)."""
+        return [f"{k} {r}" for (k, r), v in self.results.items() if not v.get("status")]
 
     def accepted(self):
         if not os.path.exists(ACCEPTED):
@@ -152,18 +213,27 @@ class Guard:
         """Is a swarm-worlds tag / commit the tested assets? (True, note) or (False, note)."""
         c = REPOS["worlds"]
         try:
+            sha = None
             if re.fullmatch(r"[0-9a-f]{7,40}", ref):
-                sha = self.gh.get(f"repos/{c['repo']}/commits/{ref}")[0]["sha"]
+                sha = ref if len(ref) == 40 else self.gh.get(f"repos/{c['repo']}/commits/{ref}")[0]["sha"]
             else:
-                obj = self.gh.get(f"repos/{c['repo']}/git/ref/tags/{ref}")[0]["object"]
-                if obj["type"] == "tag":
-                    obj = self.gh.get(f"repos/{c['repo']}/git/tags/{obj['sha']}")[0]["object"]
-                sha = obj["sha"]
+                try:                                   # git protocol first: no REST rate limit
+                    refs = self.gh.ls_remote(c["repo"])
+                    sha = refs.get(f"refs/tags/{ref}^{{}}") or refs.get(f"refs/tags/{ref}")
+                except Exception:
+                    sha = None
+                if sha is None:
+                    obj = self.gh.get(f"repos/{c['repo']}/git/ref/tags/{ref}")[0]["object"]
+                    if obj["type"] == "tag":
+                        obj = self.gh.get(f"repos/{c['repo']}/git/tags/{obj['sha']}")[0]["object"]
+                    sha = obj["sha"]
             if sha == c["tested"]:
                 return True, "the tested commit"
-            tree = self.gh.get(f"repos/{c['repo']}/git/trees/{sha}?recursive=1", conditional=False)[0]
-            holds, _ = self.compare("worlds", sha, tree["tree"])
-            return (not holds), ("assets = tested" if not holds else f"assets differ ({len(holds)} files)")
+            if sha in self.worlds_cache:
+                return self.worlds_cache[sha]
+            holds, _ = self.compare("worlds", sha, self.gh.tree(c["repo"], sha))
+            self.worlds_cache[sha] = (not holds), ("assets = tested" if not holds else f"assets differ ({len(holds)} files)")
+            return self.worlds_cache[sha]
         except Exception as e:
             return False, f"cannot resolve ({str(e)[:60]})"
 
@@ -186,26 +256,29 @@ class Guard:
                 holds.append(dict(path=p, blob=b, why="added" if not a else "removed" if not b else "changed"))
         return holds, expected
 
-    def check_ref(self, key, ref):
+    def check_ref(self, key, ref, heads=None):
         c = REPOS[key]
-        try:
-            body, _ = self.gh.get(f"repos/{c['repo']}/git/ref/heads/{ref}")
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
+        if heads is not None:                          # from `git ls-remote`: no REST call for an unchanged branch
+            sha = heads.get(f"refs/heads/{ref}")
+            if sha is None:
                 return dict(status="gone", sha=None)
-            raise
-        sha = body["object"]["sha"]
+        else:
+            try:
+                body, _ = self.gh.get(f"repos/{c['repo']}/git/ref/heads/{ref}")
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return dict(status="gone", sha=None)
+                raise
+            sha = body["object"]["sha"]
         prev = self.results.get((key, ref))
         if prev and prev.get("sha") == sha and not self.reeval:
             return prev
         if sha == c["tested"]:
             return dict(status="tested", sha=sha)
-        tree = self.gh.get(f"repos/{c['repo']}/git/trees/{sha}?recursive=1", conditional=False)[0]
-        if tree.get("truncated"):
-            return dict(status="error", sha=sha, why="tree truncated")
-        if not any(x["path"] == c["marker"] for x in tree["tree"]):
+        tree = self.gh.tree(c["repo"], sha)
+        if not any(x["path"] == c["marker"] for x in tree):
             return dict(status="absent", sha=sha)
-        holds, expected = self.compare(key, sha, tree["tree"])
+        holds, expected = self.compare(key, sha, tree)
         return dict(status="hold" if holds else "expected" if expected else "tested", sha=sha, holds=holds,
                     expected=expected)
 
@@ -234,12 +307,17 @@ class Guard:
         self.reeval, self.accepted_mtime = mt != self.accepted_mtime, mt
         events, fresh, all_ok = [], {}, True
         for key, c in REPOS.items():
+            try:
+                heads = self.gh.ls_remote(c["repo"])
+            except Exception:
+                heads = None                           # fall back to the REST API for this repo
             for ref in c["refs"]:
                 try:
-                    fresh[(key, ref)] = self.check_ref(key, ref)
+                    fresh[(key, ref)] = self.check_ref(key, ref, heads)
                 except Exception as e:
                     all_ok = False
-                    fresh[(key, ref)] = dict(self.results.get((key, ref), {}), error=str(e)[:80])
+                    old = {k: v for k, v in self.results.get((key, ref), {}).items() if k != "error"}
+                    fresh[(key, ref)] = dict(old, error=str(e)[:80])
         fresh[("pypi", "swarm-bullet3")] = self.engine_pypi()
         for k, r in fresh.items():
             p = self.results.get(k)
@@ -248,6 +326,10 @@ class Guard:
         self.results = fresh
         if all_ok:
             self.last_ok = time.time()
+        try:
+            self.save()
+        except OSError:
+            pass
         return self.verdict(), [e for e in events if e]
 
     def verdict(self):

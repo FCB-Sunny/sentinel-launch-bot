@@ -4,7 +4,7 @@
 # engine, no torch). Ends with the official check of the target zip. Safe to run again.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-set -a; . "$HERE/target.env"; set +a
+set -a; . "$HERE/target.env"; [ -f "$HERE/target.local.env" ] && . "$HERE/target.local.env"; set +a
 ENV=${SENTINEL_ENV:-$HOME/sentinel_env}; CODE=${SENTINEL_CODE:-$HOME/swarm_sentinel}
 COMMIT=3dcf8d6486b6a0105f77cb9809dfd69736b6339f
 ZIP=$TARGET_DIR/$TARGET_ZIP

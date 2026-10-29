@@ -77,7 +77,8 @@ def write_status(phase, mode, live, last, verdict, guard, state):
     refs = []
     for (key, ref), r in guard.results.items():
         tag = r.get("version") or (r.get("sha") or "")[:7]
-        refs.append(f"{key} {ref}: {r.get('status')} {tag}" + (f" ({len(r['holds'])} held files)" if r.get("holds") else ""))
+        refs.append(f"{key} {ref}: {r.get('status') or 'unknown'} {tag}" + (f" ({len(r['holds'])} held files)" if r.get("holds") else "")
+                    + (f"  [last read failed: {r['error'][:40]}]" if r.get("error") else ""))
     s = dict(time=time.time(), phase=phase, mode=mode, target=f"{NAME} {SHA[:8]}", live=live,
              backend_t=last["backend"], guard_t=last["guard"], activity_t=last["activity"], verdict=verdict,
              refs=refs, gh_calls=guard.gh.calls, submitted=state.get("submitted"), committed=state.get("committed"),
@@ -202,7 +203,7 @@ def main():
         return
     guard = G.Guard()
     activity = Activity(guard.gh)
-    last = dict(backend=0.0, guard=0.0, activity=0.0, beat=0.0, hold_note=0.0)
+    last = dict(backend=0.0, guard=0.0, activity=0.0, beat=0.0, hold_note=0.0, stale_note=0.0)
     verdict, live = "unknown", False
 
     def run_guard(first=False):
@@ -225,9 +226,11 @@ def main():
             if now - last["guard"] >= 20:
                 run_guard()                                # a fresh guard check (<= 20 s old) before any submit
             stale = time.time() - guard.last_ok > STALE_S
-            if stale:
-                log(f"guard WARNING: GitHub could not be read for {int((time.time() - guard.last_ok) / 60)} min; "
-                    "deciding on the last good check", notify=True)
+            if stale and now - last["stale_note"] > 300:
+                log(f"guard WARNING: GitHub could not be fully read for {int((time.time() - guard.last_ok) / 60)} min; "
+                    f"deciding on the last known state{' (never read: ' + ', '.join(guard.unknown()) + ')' if guard.unknown() else ''}",
+                    notify=True)
+                last["stale_note"] = now
             ok = verdict == "ok" or args.allow_code_change
             if not args.live:
                 if not alerted:

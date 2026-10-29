@@ -9,3 +9,7 @@ verify.log
 __pycache__/
 bot_status.json
 bot_status.json.tmp
+guard_state.json
+guard_state.json.tmp
+target.local.env
+.gitcache/

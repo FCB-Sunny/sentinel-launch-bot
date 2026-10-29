@@ -33,7 +33,7 @@ bash bot.sh reboot-on   # optional: start it again by itself after a VPS reboot
 ```
 
 `setup` clones the target repo (`FCB-Sunny/sentinel-v10g`) to `~/sentinel-v10g`, the Swarm code at `3dcf8d6` to
-`~/swarm_sentinel`, and creates `~/sentinel_env` with the 48 packages `swarm model verify` and `swarm model submit` need
+`~/swarm_sentinel`, and creates `~/sentinel_env` with the 64 pinned packages `swarm model verify` and `swarm model submit` need
 (no simulator engine, no torch). If `python3.11` is missing: `sudo apt install -y python3.11 python3.11-venv git`
 (3.12 also works).
 
